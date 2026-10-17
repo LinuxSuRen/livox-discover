@@ -1,0 +1,21 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check
+        run: python3 -m py_compile livox_discover.py
+      - name: Run 1s discovery smoke test
+        # Binds the UDP ports, listens 1s, exits 0 — catches import/runtime regressions.
+        run: |
+          timeout 30 python3 livox_discover.py 1
+          test $? -eq 0
