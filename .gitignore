@@ -1,0 +1,9 @@
+# Go build outputs
+/livox-discover
+/livox-discover-*
+dist/
+*.tar.gz
+
+# Python leftovers
+__pycache__/
+*.pyc
