@@ -2,6 +2,9 @@
 // listening to the UDP ports they broadcast or push to, and reports every
 // sender it observes. Datagrams that decode as SDK2 discovery ACKs are
 // surfaced with device type, serial number and lidar IP.
+//
+// The set-ip subcommand additionally changes a lidar's own IP, subnet mask
+// and gateway through the SDK2 key-value control command.
 package main
 
 import (
@@ -33,6 +36,10 @@ func main() {
 }
 
 func run() int {
+	if len(os.Args) > 1 && os.Args[1] == "set-ip" {
+		return runSetIP(os.Args[2:])
+	}
+
 	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 	duration := fs.Duration("duration", defaultDuration, "how long to listen, e.g. 15s, 500ms, 2m")
 	jsonOut := fs.Bool("json", false, "print a machine-readable JSON report instead of the text log")
@@ -41,7 +48,7 @@ func run() int {
 		return 2
 	}
 	if fs.NArg() > 0 {
-		fmt.Fprintf(os.Stderr, "unexpected argument %q (use flags only, see -help)\n", fs.Arg(0))
+		fmt.Fprintf(os.Stderr, "unexpected argument %q (use flags only, or the set-ip subcommand; see -help)\n", fs.Arg(0))
 		return 2
 	}
 	if *duration <= 0 {
