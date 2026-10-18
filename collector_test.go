@@ -172,6 +172,30 @@ func TestCollectorToleratesMalformedLivox(t *testing.T) {
 	}
 }
 
+func TestLidarSidePortWarning(t *testing.T) {
+	tests := []struct {
+		name  string
+		ports []int
+		want  string
+	}{
+		{"defaults stay silent", []int{55000, 56000, 56201}, ""},
+		{"host-side ports stay silent", []int{56101, 56301}, ""},
+		{"single lidar-side port", []int{56000, 56100},
+			"[warn] 56100 is a lidar-side port: the lidar listens there but never sends; " +
+				"to observe its traffic listen on 56101 instead (discovery broadcasts arrive on 56000)"},
+		{"all lidar-side ports", []int{56100, 56200, 56300, 56400, 56500},
+			"[warn] 56100,56200,56300,56400,56500 are lidar-side ports: the lidar listens there but never sends; " +
+				"to observe its traffic listen on 56101,56201,56301,56401,56501 instead (discovery broadcasts arrive on 56000)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := lidarSidePortWarning(tt.ports); got != tt.want {
+				t.Errorf("lidarSidePortWarning(%v) =\n %q\nwant\n %q", tt.ports, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParsePorts(t *testing.T) {
 	tests := []struct {
 		name    string

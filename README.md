@@ -161,6 +161,7 @@ Ports: `56000` is the SDK2 discovery broadcast port, `56201` carries status push
 - A source that shows up on port 56000 with `0xAA`-headed packets is an SDK2 lidar; sources that never appear are either powered off, on another subnet (data-plane is unicast and must be same-subnet), or filtered.
 - Run it on the host that the lidar sends data to (same NIC/subnet as configured in `host_net_info`).
 - `-ports` accepts any comma-separated list, e.g. `-ports 56000` for a focused scan or a high port for testing.
+- Mind the two port sides: the lidar listens on `56x00` (56100–56500) but sends to the host on `56x01` plus the 56000 discovery broadcast. Listening on lidar-side ports receives nothing; the tool prints a warning when `-ports` contains them.
 
 ## Development
 

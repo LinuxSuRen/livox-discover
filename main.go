@@ -72,6 +72,10 @@ func run() int {
 		}
 	}
 
+	if msg := lidarSidePortWarning(ports); msg != "" {
+		logf("%s", msg)
+	}
+
 	bound, skipped := openListeners(ports)
 	var skippedJSON []skippedPortJSON
 	for _, port := range ports {
@@ -212,6 +216,44 @@ func parsePorts(spec string) ([]int, error) {
 		return nil, fmt.Errorf("no valid ports in %q", spec)
 	}
 	return ports, nil
+}
+
+// lidarSidePorts lists the lidar-side command/data ports of the SDK2 Mid360
+// family next to the host-side ports the lidar actually sends to (from
+// comm/define.h of Livox-SDK2: lidar 56x00, host 56x01). Listening on a
+// lidar-side port is a common mix-up that keeps the tool silent forever.
+var lidarSidePorts = []struct{ lidar, host int }{
+	{56100, 56101}, // command channel
+	{56200, 56201}, // status push
+	{56300, 56301}, // point cloud
+	{56400, 56401}, // IMU
+	{56500, 56501}, // log
+}
+
+// lidarSidePortWarning returns a warning line when ports contains lidar-side
+// ports, or "" when every port is a legitimate listening target.
+func lidarSidePortWarning(ports []int) string {
+	contains := make(map[int]bool, len(ports))
+	for _, p := range ports {
+		contains[p] = true
+	}
+	var lidarSide, hostSide []string
+	for _, pair := range lidarSidePorts {
+		if contains[pair.lidar] {
+			lidarSide = append(lidarSide, strconv.Itoa(pair.lidar))
+			hostSide = append(hostSide, strconv.Itoa(pair.host))
+		}
+	}
+	if len(lidarSide) == 0 {
+		return ""
+	}
+	verb := "are lidar-side ports"
+	if len(lidarSide) == 1 {
+		verb = "is a lidar-side port"
+	}
+	return fmt.Sprintf("[warn] %s %s: the lidar listens there but never sends; "+
+		"to observe its traffic listen on %s instead (discovery broadcasts arrive on 56000)",
+		strings.Join(lidarSide, ","), verb, strings.Join(hostSide, ","))
 }
 
 // hexHead renders up to n leading bytes as space-separated hex.
