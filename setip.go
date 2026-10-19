@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/LinuxSuRen/livox-discover/internal/livox"
@@ -124,30 +125,46 @@ func runSetIP(args []string) int {
 		return 1
 	}
 	fmt.Fprintf(os.Stderr, "[set-ip] no ack from %s:%d after %d attempts\n", *lidarIP, *cmdPort, setIPAttempts)
-	fmt.Fprintln(os.Stderr, "[set-ip] check that -lidar is the lidar's current IP, that no driver occupies the")
-	fmt.Fprintln(os.Stderr, "[set-ip] lidar, and that this host shares the lidar's subnet.")
+	if runtime.GOOS == "darwin" {
+		fmt.Fprintf(os.Stderr, "[set-ip] lidar in another subnet? add a path first: sudo ifconfig <iface> alias <lidar-net>.50 255.255.255.0\n")
+		fmt.Fprintf(os.Stderr, "[set-ip] or a host route only: sudo route -n add -host %s -interface <iface>\n", *lidarIP)
+	} else {
+		fmt.Fprintf(os.Stderr, "[set-ip] lidar in another subnet? add a path first: sudo ip addr add <lidar-net>.50/24 dev <iface>\n")
+		fmt.Fprintf(os.Stderr, "[set-ip] or a host route only: sudo ip route add %s/32 dev <iface>\n", *lidarIP)
+	}
+	fmt.Fprintln(os.Stderr, "[set-ip] also check that -lidar is the lidar's current IP and that no driver occupies the lidar.")
 	return 1
 }
 
-// readACK waits up to wait for the ACK matching seq, skipping unrelated
-// datagrams (e.g. the lidar's periodic discovery broadcasts).
-func readACK(conn net.PacketConn, buf []byte, seq uint32, wait time.Duration) (livox.AsyncControlACK, string, error) {
+// readUntil waits up to wait for a datagram that parse accepts, skipping
+// unrelated traffic such as the lidar's periodic status pushes, and reports
+// the sender's address.
+func readUntil[T any](conn net.PacketConn, buf []byte, wait time.Duration, parse func([]byte) (T, error)) (T, string, error) {
+	var zero T
 	if err := conn.SetReadDeadline(time.Now().Add(wait)); err != nil {
-		return livox.AsyncControlACK{}, "", err
+		return zero, "", err
 	}
 	for {
 		n, addr, err := conn.ReadFrom(buf)
 		if err != nil {
-			return livox.AsyncControlACK{}, "", err // deadline exceeded or socket closed
+			return zero, "", err // deadline exceeded or socket closed
 		}
 		udp, ok := addr.(*net.UDPAddr)
 		if !ok {
 			continue
 		}
-		if ack, _, err := livox.ParseAsyncControlACK(buf[:n], seq); err == nil {
-			return ack, udp.IP.String(), nil
+		if v, err := parse(buf[:n]); err == nil {
+			return v, udp.IP.String(), nil
 		}
 	}
+}
+
+// readACK waits up to wait for the key-value control ACK matching seq.
+func readACK(conn net.PacketConn, buf []byte, seq uint32, wait time.Duration) (livox.AsyncControlACK, string, error) {
+	return readUntil(conn, buf, wait, func(data []byte) (livox.AsyncControlACK, error) {
+		ack, _, err := livox.ParseAsyncControlACK(data, seq)
+		return ack, err
+	})
 }
 
 // openCmdSocket binds the host command port the SDK uses so the lidar's ACK

@@ -1,10 +1,13 @@
 // Command livox-discover finds Livox SDK2 lidars on the local network by
 // listening to the UDP ports they broadcast or push to, and reports every
 // sender it observes. Datagrams that decode as SDK2 discovery ACKs are
-// surfaced with device type, serial number and lidar IP.
+// surfaced with device type, serial number and lidar IP. With -probe a
+// discovery query is actively broadcast from every IPv4 interface as well,
+// which also reaches lidars that stay silent unless queried.
 //
-// The set-ip subcommand additionally changes a lidar's own IP, subnet mask
-// and gateway through the SDK2 key-value control command.
+// The set-ip subcommand changes a lidar's own IP, subnet mask and gateway
+// through the SDK2 key-value control command; reboot restarts a lidar so a
+// saved change takes effect without touching its power.
 package main
 
 import (
@@ -15,6 +18,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,19 +40,25 @@ func main() {
 }
 
 func run() int {
-	if len(os.Args) > 1 && os.Args[1] == "set-ip" {
-		return runSetIP(os.Args[2:])
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "set-ip":
+			return runSetIP(os.Args[2:])
+		case "reboot":
+			return runReboot(os.Args[2:])
+		}
 	}
 
 	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 	duration := fs.Duration("duration", defaultDuration, "how long to listen, e.g. 15s, 500ms, 2m")
 	jsonOut := fs.Bool("json", false, "print a machine-readable JSON report instead of the text log")
 	portsFlag := fs.String("ports", defaultPorts, "comma-separated UDP ports to listen on")
+	probe := fs.Bool("probe", false, "also broadcast a discovery query every second from every IPv4 interface (finds lidars that only answer queries)")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return 2
 	}
 	if fs.NArg() > 0 {
-		fmt.Fprintf(os.Stderr, "unexpected argument %q (use flags only, or the set-ip subcommand; see -help)\n", fs.Arg(0))
+		fmt.Fprintf(os.Stderr, "unexpected argument %q (use flags only, or the set-ip / reboot subcommands; see -help)\n", fs.Arg(0))
 		return 2
 	}
 	if *duration <= 0 {
@@ -99,7 +109,7 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	c, interrupted := listenAndCollect(ctx, bound, *duration, *jsonOut, logf)
+	c, interrupted := listenAndCollect(ctx, bound, *duration, *jsonOut, logf, *probe)
 	if *jsonOut {
 		emitJSON(buildReport(c, *duration, ports, skippedJSON, interrupted))
 	} else {
@@ -112,8 +122,9 @@ func run() int {
 }
 
 // listenAndCollect reads packets until the duration elapses or the context is
-// cancelled, and returns the aggregated collector.
-func listenAndCollect(ctx context.Context, bound []boundPort, duration time.Duration, jsonOut bool, logf func(string, ...any)) (*collector, bool) {
+// cancelled, and returns the aggregated collector. With probe set it also
+// broadcasts discovery queries from every IPv4 interface while listening.
+func listenAndCollect(ctx context.Context, bound []boundPort, duration time.Duration, jsonOut bool, logf func(string, ...any), probe bool) (*collector, bool) {
 	logf("listening %s ...", duration)
 	timer := time.NewTimer(duration)
 	defer timer.Stop()
@@ -124,13 +135,28 @@ func listenAndCollect(ctx context.Context, bound []boundPort, duration time.Dura
 		wg.Add(1)
 		go readLoop(&wg, packets, b)
 	}
+	// ownIPs carries this host's own addresses so the loopback copies of
+	// our own probe broadcasts are not mistaken for lidar traffic.
+	ownIPs := map[string]bool{}
+	var stopProbe func()
+	if probe {
+		var probeConn net.PacketConn
+		for _, b := range bound {
+			if b.port == discoveryQueryPort {
+				probeConn = b.conn
+			}
+		}
+		stopProbe, ownIPs = startProbes(probeConn, logf)
+	}
 
 	c := newCollector()
 collect:
 	for {
 		select {
 		case p := <-packets:
-			handlePacket(c, p, jsonOut)
+			if !ownIPs[p.srcIP] {
+				handlePacket(c, p, jsonOut)
+			}
 		case <-timer.C:
 			break collect
 		case <-ctx.Done():
@@ -143,12 +169,17 @@ collect:
 	for _, b := range bound {
 		b.conn.Close()
 	}
+	if stopProbe != nil {
+		stopProbe()
+	}
 	go func() {
 		wg.Wait()
 		close(packets)
 	}()
 	for p := range packets {
-		handlePacket(c, p, jsonOut)
+		if !ownIPs[p.srcIP] {
+			handlePacket(c, p, jsonOut)
+		}
 	}
 	return c, ctx.Err() != nil
 }
@@ -182,6 +213,9 @@ func printSummary(c *collector) {
 			fmt.Printf("    dev=%s(%d)  sn=%s  lidar_ip=%s  cmd_port=%d  ret_code=%d\n",
 				d.DevTypeName(), d.DevType, d.SN, d.LidarIP, d.CmdPort, d.RetCode)
 		}
+	}
+	for _, h := range crossSubnetHints(c.allDiscoveries(), localIPv4Nets(), runtime.GOOS) {
+		fmt.Println(h)
 	}
 }
 

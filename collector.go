@@ -101,6 +101,18 @@ func (c *collector) sortedSources() []*sourceInfo {
 	return out
 }
 
+// allDiscoveries returns every decoded discovery ACK across all sources,
+// regardless of ordering; used for the cross-subnet diagnostics.
+func (c *collector) allDiscoveries() []livox.DetectionData {
+	var out []livox.DetectionData
+	for _, s := range c.sources {
+		for _, d := range s.discoveries {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
 // sortedDiscoveries returns the decoded devices of one source in a stable
 // (sn, lidar_ip) order.
 func (s *sourceInfo) sortedDiscoveries() []livox.DetectionData {
