@@ -7,7 +7,8 @@
 //
 // The set-ip subcommand changes a lidar's own IP, subnet mask and gateway
 // through the SDK2 key-value control command; reboot restarts a lidar so a
-// saved change takes effect without touching its power.
+// saved change takes effect without touching its power; web serves a small
+// browser UI wrapping all of the above.
 package main
 
 import (
@@ -46,6 +47,8 @@ func run() int {
 			return runSetIP(os.Args[2:])
 		case "reboot":
 			return runReboot(os.Args[2:])
+		case "web":
+			return runWeb(os.Args[2:])
 		}
 	}
 
@@ -109,7 +112,7 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	c, interrupted := listenAndCollect(ctx, bound, *duration, *jsonOut, logf, *probe)
+	c, interrupted := listenAndCollect(ctx, bound, *duration, *jsonOut, logf, *probe, nil)
 	if *jsonOut {
 		emitJSON(buildReport(c, *duration, ports, skippedJSON, interrupted))
 	} else {
@@ -124,10 +127,18 @@ func run() int {
 // listenAndCollect reads packets until the duration elapses or the context is
 // cancelled, and returns the aggregated collector. With probe set it also
 // broadcasts discovery queries from every IPv4 interface while listening.
-func listenAndCollect(ctx context.Context, bound []boundPort, duration time.Duration, jsonOut bool, logf func(string, ...any), probe bool) (*collector, bool) {
+// onTick, when not nil, is called about once per second with the collector,
+// on the same goroutine, so callers can snapshot progress race-free.
+func listenAndCollect(ctx context.Context, bound []boundPort, duration time.Duration, jsonOut bool, logf func(string, ...any), probe bool, onTick func(*collector)) (*collector, bool) {
 	logf("listening %s ...", duration)
 	timer := time.NewTimer(duration)
 	defer timer.Stop()
+	var tick <-chan time.Time
+	if onTick != nil {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		tick = ticker.C
+	}
 
 	packets := make(chan udpPacket, 256)
 	var wg sync.WaitGroup
@@ -157,6 +168,8 @@ collect:
 			if !ownIPs[p.srcIP] {
 				handlePacket(c, p, jsonOut)
 			}
+		case <-tick:
+			onTick(c)
 		case <-timer.C:
 			break collect
 		case <-ctx.Done():

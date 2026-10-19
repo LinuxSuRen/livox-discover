@@ -51,51 +51,23 @@ func runReboot(args []string) int {
 		return 2
 	}
 
-	conn, localPort, err := openCmdSocket()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "cannot open a UDP socket: %v\n", err)
+	fmt.Printf("[reboot] %s:%d  delay=%d\n", *lidarIP, *cmdPort, *delay)
+
+	outcome := performReboot(targetIP, *cmdPort, uint32(*delay), func(format string, args ...any) {
+		fmt.Printf(format+"\n", args...)
+	})
+	if outcome.err != nil {
+		fmt.Fprintf(os.Stderr, "[reboot] %v; check the IP and subnet reachability.\n", outcome.err)
 		return 1
 	}
-	defer conn.Close()
-	if localPort != preferredHostCmdPort {
-		fmt.Fprintf(os.Stderr, "[warn] port %d busy, sending from ephemeral port %d instead\n", preferredHostCmdPort, localPort)
+	ack := *outcome.ack
+	if !ack.OK() {
+		fmt.Fprintf(os.Stderr, "[ack] from %s  ret_code=%d\n", outcome.from, ack.RetCode)
+		fmt.Fprintln(os.Stderr, "[reboot] the lidar rejected the reboot request.")
+		return 1
 	}
-
-	target := &net.UDPAddr{IP: targetIP.To4(), Port: *cmdPort}
-	fmt.Printf("[reboot] %s:%d  delay=%d  (from :%d)\n", *lidarIP, *cmdPort, *delay, localPort)
-
-	buf := make([]byte, recvBufSize)
-	for attempt := 1; attempt <= rebootAttempts; attempt++ {
-		seq := uint32(attempt)
-		frame, err := livox.BuildRebootFrame(uint32(*delay), seq)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "build frame: %v\n", err)
-			return 1
-		}
-		if _, err := conn.WriteTo(frame, target); err != nil {
-			fmt.Fprintf(os.Stderr, "send: %v\n", err)
-			return 1
-		}
-		fmt.Printf("[reboot] attempt %d/%d: sent %d bytes\n", attempt, rebootAttempts, len(frame))
-
-		ack, from, err := readUntil(conn, buf, rebootAttemptWait, func(data []byte) (livox.RebootACK, error) {
-			return livox.ParseRebootACK(data, seq)
-		})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[reboot] attempt %d/%d: %v\n", attempt, rebootAttempts, err)
-			continue
-		}
-		if !ack.OK() {
-			fmt.Fprintf(os.Stderr, "[ack] from %s  ret_code=%d\n", from, ack.RetCode)
-			fmt.Fprintln(os.Stderr, "[reboot] the lidar rejected the reboot request.")
-			return 1
-		}
-		fmt.Printf("[ack] from %s  ret_code=0\n", from)
-		fmt.Printf("[reboot] success: %s is restarting; a Mid360 boots in well under a minute.\n", *lidarIP)
-		fmt.Println("[reboot] afterwards run livox-discover again (or query the new IP directly) to verify.")
-		return 0
-	}
-	fmt.Fprintf(os.Stderr, "[reboot] no ack from %s:%d after %d attempts; check the IP and subnet reachability.\n",
-		*lidarIP, *cmdPort, rebootAttempts)
-	return 1
+	fmt.Printf("[ack] from %s  ret_code=0\n", outcome.from)
+	fmt.Printf("[reboot] success: %s is restarting; a Mid360 boots in well under a minute.\n", *lidarIP)
+	fmt.Println("[reboot] afterwards run livox-discover again (or query the new IP directly) to verify.")
+	return 0
 }

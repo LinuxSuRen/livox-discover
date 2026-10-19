@@ -79,60 +79,32 @@ func runSetIP(args []string) int {
 		return 2
 	}
 
-	conn, localPort, err := openCmdSocket()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "cannot open a UDP socket: %v\n", err)
+	fmt.Printf("[set-ip] %s:%d -> ip=%s mask=%s gw=%s\n", *lidarIP, *cmdPort, cfg.IP, cfg.Mask, cfg.Gateway)
+
+	outcome := performSetIP(targetIP, *cmdPort, cfg, func(format string, args ...any) {
+		fmt.Printf(format+"\n", args...)
+	})
+	if outcome.err != nil {
+		fmt.Fprintf(os.Stderr, "[set-ip] %v\n", outcome.err)
+		if runtime.GOOS == "darwin" {
+			fmt.Fprintf(os.Stderr, "[set-ip] lidar in another subnet? add a path first: sudo ifconfig <iface> alias <lidar-net>.50 255.255.255.0\n")
+			fmt.Fprintf(os.Stderr, "[set-ip] or a host route only: sudo route -n add -host %s -interface <iface>\n", *lidarIP)
+		} else {
+			fmt.Fprintf(os.Stderr, "[set-ip] lidar in another subnet? add a path first: sudo ip addr add <lidar-net>.50/24 dev <iface>\n")
+			fmt.Fprintf(os.Stderr, "[set-ip] or a host route only: sudo ip route add %s/32 dev <iface>\n", *lidarIP)
+		}
+		fmt.Fprintln(os.Stderr, "[set-ip] also check that -lidar is the lidar's current IP and that no driver occupies the lidar.")
 		return 1
 	}
-	defer conn.Close()
-	if localPort != preferredHostCmdPort {
-		fmt.Fprintf(os.Stderr, "[warn] port %d busy, sending from ephemeral port %d instead\n", preferredHostCmdPort, localPort)
+	ack := *outcome.ack
+	if ack.OK() {
+		fmt.Printf("[ack] from %s  ret_code=0  error_key=0\n", outcome.from)
+		fmt.Printf("[set-ip] success: lidar %s now uses ip %s mask %s gw %s\n", *lidarIP, cfg.IP, cfg.Mask, cfg.Gateway)
+		fmt.Println("[set-ip] the change is stored and takes effect after the lidar restarts; run livox-discover reboot -lidar " + cfg.IP + " (or power-cycle) and verify.")
+		return 0
 	}
-
-	target := &net.UDPAddr{IP: targetIP.To4(), Port: *cmdPort}
-	fmt.Printf("[set-ip] %s:%d -> ip=%s mask=%s gw=%s (from :%d)\n",
-		*lidarIP, *cmdPort, cfg.IP, cfg.Mask, cfg.Gateway, localPort)
-
-	buf := make([]byte, recvBufSize)
-	for attempt := 1; attempt <= setIPAttempts; attempt++ {
-		seq := uint32(attempt)
-		frame, err := livox.BuildSetLidarIPFrame(cfg, seq)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "build frame: %v\n", err)
-			return 1
-		}
-		if _, err := conn.WriteTo(frame, target); err != nil {
-			fmt.Fprintf(os.Stderr, "send: %v\n", err)
-			return 1
-		}
-		fmt.Printf("[set-ip] attempt %d/%d: sent %d bytes\n", attempt, setIPAttempts, len(frame))
-
-		ack, from, err := readACK(conn, buf, seq, setIPAttemptWait)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[set-ip] attempt %d/%d: %v\n", attempt, setIPAttempts, err)
-			continue
-		}
-		if ack.OK() {
-			fmt.Printf("[ack] from %s  ret_code=0  error_key=0\n", from)
-			fmt.Printf("[set-ip] success: lidar %s now uses ip %s mask %s gw %s\n", *lidarIP, cfg.IP, cfg.Mask, cfg.Gateway)
-			fmt.Println("[set-ip] verify with a fresh discovery run; the lidar should now answer from its new IP.")
-			fmt.Println("[set-ip] if it stays silent, power-cycle the lidar once and re-run livox-discover.")
-			return 0
-		}
-		fmt.Fprintf(os.Stderr, "[ack] from %s  ret_code=%d  error_key=%#04x\n",
-			from, ack.RetCode, ack.ErrorKey)
-		fmt.Fprintln(os.Stderr, "[set-ip] the lidar rejected the configuration; check that ip/mask/gw are consistent.")
-		return 1
-	}
-	fmt.Fprintf(os.Stderr, "[set-ip] no ack from %s:%d after %d attempts\n", *lidarIP, *cmdPort, setIPAttempts)
-	if runtime.GOOS == "darwin" {
-		fmt.Fprintf(os.Stderr, "[set-ip] lidar in another subnet? add a path first: sudo ifconfig <iface> alias <lidar-net>.50 255.255.255.0\n")
-		fmt.Fprintf(os.Stderr, "[set-ip] or a host route only: sudo route -n add -host %s -interface <iface>\n", *lidarIP)
-	} else {
-		fmt.Fprintf(os.Stderr, "[set-ip] lidar in another subnet? add a path first: sudo ip addr add <lidar-net>.50/24 dev <iface>\n")
-		fmt.Fprintf(os.Stderr, "[set-ip] or a host route only: sudo ip route add %s/32 dev <iface>\n", *lidarIP)
-	}
-	fmt.Fprintln(os.Stderr, "[set-ip] also check that -lidar is the lidar's current IP and that no driver occupies the lidar.")
+	fmt.Fprintf(os.Stderr, "[ack] from %s  ret_code=%d  error_key=%#04x\n", outcome.from, ack.RetCode, ack.ErrorKey)
+	fmt.Fprintln(os.Stderr, "[set-ip] the lidar rejected the configuration; check that ip/mask/gw are consistent.")
 	return 1
 }
 

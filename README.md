@@ -1,6 +1,6 @@
 # livox-discover
 
-Zero-dependency CLI that finds **Livox SDK2 lidars** (Mid360 / Mid360S / Avia / Avia2 ...) on your network in seconds, by listening to their UDP broadcast/push ports and decoding their discovery replies — and can re-IP a lidar without the Livox tools.
+Zero-dependency CLI that finds **Livox SDK2 lidars** (Mid360 / Mid360S / Avia / Avia2 ...) on your network in seconds, by listening to their UDP broadcast/push ports and decoding their discovery replies — and can re-IP a lidar without the Livox tools, from the CLI or a small built-in web UI.
 
 Written in Go, standard library only.
 
@@ -143,6 +143,28 @@ $ livox-discover reboot -lidar 192.168.1.120
 ```
 
 Flags: `-lidar` (required), `-cmd-port` (default 56100), `-delay` (default 100, the value the SDK sends). Exit codes match `set-ip`.
+
+## Web UI
+
+`web` serves the same capabilities in a browser — handy when a CLI is awkward, or from a tablet next to the lidar:
+
+```bash
+livox-discover web                        # http://127.0.0.1:8080
+livox-discover web -listen 0.0.0.0:8080   # open the UI to the network
+```
+
+The page has a scan panel (duration + active-probe toggle), the discovered-lidar table, and an ops panel that prefills from the selected lidar: change IP and reboot with one click, cross-subnet hints included. Scan progress streams over SSE (`GET /api/events`, pushed only on change) with `GET /api/scan` as a plain REST fallback; errors carry stable `LVX-*` codes with readable messages.
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/scan` `{duration_seconds, probe}` | start a background scan (202; 409 while one runs) |
+| `GET /api/scan` | current scan state incl. interim results |
+| `POST /api/scan/stop` | stop the running scan early |
+| `GET /api/events` | SSE stream of scan state |
+| `POST /api/set-ip` `{lidar, ip, mask, gw, cmd_port}` | change a lidar's IP |
+| `POST /api/reboot` `{lidar, cmd_port, delay}` | restart a lidar |
+
+The frontend is a Vue 3 app embedded into the binary — `web/dist` is committed (~80 KB), so `go install` needs no node toolchain. To develop it: `cd web && npm install && npm run dev` (proxies `/api` to a `livox-discover web` instance on 127.0.0.1:8080), then `npm run build` and commit the refreshed `dist` together with the source changes.
 
 ## Cross-subnet lidars
 
