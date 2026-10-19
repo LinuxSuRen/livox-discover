@@ -1,6 +1,6 @@
 # livox-discover
 
-Zero-dependency CLI that finds **Livox SDK2 lidars** (Mid360 / Mid360S / Avia / Avia2 ...) on your network in seconds, by listening to their UDP broadcast/push ports and decoding their discovery replies.
+Zero-dependency CLI that finds **Livox SDK2 lidars** (Mid360 / Mid360S / Avia / Avia2 ...) on your network in seconds, by listening to their UDP broadcast/push ports and decoding their discovery replies — and can re-IP a lidar without the Livox tools, from the CLI or a small built-in web UI.
 
 Written in Go, standard library only.
 
@@ -10,7 +10,8 @@ Livox SDK2 has no standalone discovery CLI. Common pain it solves:
 
 - The lidar's factory IP does not match the `lidar_configs[].ip` in your driver JSON — the driver silently receives nothing;
 - Multiple Livox units are on the network and you need the real IP of each;
-- You want to see which units are actually broadcasting before digging into driver configs.
+- You want to see which units are actually broadcasting before digging into driver configs;
+- You need to move a lidar to another IP and don't want to install the SDK just for that.
 
 ## Install
 
@@ -58,6 +59,7 @@ The `src` IP in the summary is the lidar's address — paste it into the `ip` fi
 |---|---|---|
 | `-duration` | `15s` | how long to listen (Go duration syntax: `15s`, `500ms`, `2m`) |
 | `-ports` | `55000,56000,56201` | comma-separated UDP ports to listen on |
+| `-probe` | off | also broadcast a discovery query every second from every IPv4 interface; some lidars stay silent unless queried |
 | `-json` | off | print one machine-readable JSON report instead of the text log |
 
 `Ctrl-C` stops listening early and still prints the report (exit code 130). Exit codes: `0` normal, `1` when no port could be bound at all, `2` for invalid flags.
@@ -95,9 +97,86 @@ livox-discover -json -duration 10s | jq -r '.sources[].discoveries[] | "\(.sn) \
 }
 ```
 
+## Change a lidar's IP
+
+Once a discovery run gave you the lidar's current IP, the `set-ip` subcommand changes the lidar's own IP, subnet mask and gateway through the same SDK2 command channel a driver would use (`kKeyLidarIpCfg`, no registration handshake needed):
+
+```text
+$ livox-discover set-ip -lidar 192.168.1.100 -ip 192.168.1.120
+[set-ip] 192.168.1.100:56100 -> ip=192.168.1.120 mask=255.255.255.0 gw=192.168.1.1 (from :56101)
+[set-ip] attempt 1/3: sent 44 bytes
+[ack] from 192.168.1.100  ret_code=0  error_key=0
+[set-ip] success: lidar 192.168.1.100 now uses ip 192.168.1.120 mask 255.255.255.0 gw 192.168.1.1
+[set-ip] verify with a fresh discovery run; the lidar should now answer from its new IP.
+[set-ip] if it stays silent, power-cycle the lidar once and re-run livox-discover.
+```
+
+### set-ip flags
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `-lidar` | — | current IP of the target lidar, as reported by a discovery run (required) |
+| `-ip` | — | new lidar IP (required) |
+| `-mask` | `255.255.255.0` | new subnet mask |
+| `-gw` | derived | new gateway; defaults to the first three octets of `-ip` with a final `.1` |
+| `-cmd-port` | `56100` | lidar command port (Mid360/Mid360S/Avia2/Mid360L all use 56100) |
+
+The command is unicast from host port 56101 (falling back to an ephemeral port if a driver holds it) to the lidar's command port, repeated up to 3 times with a 1s timeout each — the same timeout the SDK uses. Exit codes: `0` the lidar accepted, `1` no/rejecting answer, `2` bad usage.
+
+Notes:
+
+- **A saved IP only takes effect after the lidar restarts** (verified on a Mid360S): the ACK means "stored", the runtime IP stays on the old value until then. Use the `reboot` subcommand — or power-cycle — then verify with `livox-discover -probe`.
+- Keep the new IP on the same subnet as this host, otherwise the lidar becomes unreachable after the change.
+- To change the IP of a lidar that currently sits in another subnet than your NIC, first add a temporary address or host route on the subnet the lidar is in (`sudo ifconfig <iface> alias <lidar-net>.50 255.255.255.0` on macOS, `sudo ip addr add <lidar-net>.50/24 dev <iface>` on Linux); the tool prints the matching hint when it detects the situation.
+- The frame carries ip/mask/gateway as one key-value entry; an inconsistent triple is rejected by the lidar (`ret_code != 0`, `error_key = 0x0004`).
+
+## Reboot a lidar
+
+`reboot` sends the SDK2 reboot command (`cmd 0x0200`) to the lidar's command port — the cable-free way to make a saved IP change take effect:
+
+```text
+$ livox-discover reboot -lidar 192.168.1.120
+[reboot] 192.168.1.120:56100  delay=100  (from :56101)
+[reboot] attempt 1/3: sent 28 bytes
+[ack] from 192.168.1.120  ret_code=0
+[reboot] success: 192.168.1.120 is restarting; a Mid360 boots in well under a minute.
+```
+
+Flags: `-lidar` (required), `-cmd-port` (default 56100), `-delay` (default 100, the value the SDK sends). Exit codes match `set-ip`.
+
+## Web UI
+
+`web` serves the same capabilities in a browser — handy when a CLI is awkward, or from a tablet next to the lidar:
+
+```bash
+livox-discover web                        # http://127.0.0.1:8080
+livox-discover web -listen 0.0.0.0:8080   # open the UI to the network
+```
+
+The page has a scan panel (duration + active-probe toggle), the discovered-lidar table, and an ops panel that prefills from the selected lidar: change IP and reboot with one click, cross-subnet hints included. Scan progress streams over SSE (`GET /api/events`, pushed only on change) with `GET /api/scan` as a plain REST fallback; errors carry stable `LVX-*` codes with readable messages.
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/scan` `{duration_seconds, probe}` | start a background scan (202; 409 while one runs) |
+| `GET /api/scan` | current scan state incl. interim results |
+| `POST /api/scan/stop` | stop the running scan early |
+| `GET /api/events` | SSE stream of scan state |
+| `POST /api/set-ip` `{lidar, ip, mask, gw, cmd_port}` | change a lidar's IP |
+| `POST /api/reboot` `{lidar, cmd_port, delay}` | restart a lidar |
+
+The frontend is a Vue 3 app embedded into the binary — `web/dist` is committed (~80 KB), so `go install` needs no node toolchain. To develop it: `cd web && npm install && npm run dev` (proxies `/api` to a `livox-discover web` instance on 127.0.0.1:8080), then `npm run build` and commit the refreshed `dist` together with the source changes.
+
+## Cross-subnet lidars
+
+The lidar's discovery traffic is link-layer broadcast, so as long as it hangs on the same L2 network the tool can see it even when its IP sits in a different subnet than your NIC (factory default `192.168.144.1xx` vs your `192.168.31.x`, say). Caveats and helpers:
+
+- Not every lidar talks unprompted — the Mid360S under test never broadcast on its own and ignored queries from ephemeral source ports. It answered only queries sent **from source port 56000**, exactly how the SDK emits them. `-probe` therefore reuses the tool's 56000 listener as its query source and broadcasts one query per second to every local subnet's directed broadcast address; replies are reported like any other hit and the loopback copies of the tool's own broadcasts are filtered out.
+- On Linux, strict reverse-path filtering (`net.ipv4.conf.all.rp_filter = 1`) can drop cross-subnet packets as martians; relax it for the lidar-facing interface if the tool stays silent while `tcpdump` still shows traffic.
+- When a discovered lidar is outside every local subnet, the summary prints `[hint]` lines with the exact `ifconfig`/`ip` commands that give this host a path to it — unicast tools (drivers, `set-ip`) need one of them. `set-ip` prints the same advice when a lidar never answers.
+
 ## How it works
 
-Livox SDK2 devices periodically answer discovery queries by broadcasting UDP packets that use the SDK2 command frame format. The tool passively binds the SDK2 broadcast/push ports with `SO_REUSEADDR`, counts every sender it observes, and fully validates + decodes every discovery ACK.
+Livox SDK2 devices answer discovery queries with UDP packets that use the SDK2 command frame format, and many broadcast them periodically even when nobody asks. The tool passively binds the SDK2 broadcast/push ports with `SO_REUSEADDR`, counts every sender it observes, and fully validates + decodes every discovery ACK; with `-probe` it additionally broadcasts queries itself, ignoring the loopback copies of its own broadcasts.
 
 Command frame header (24 bytes, little-endian):
 
@@ -119,6 +198,8 @@ Both CRCs are verified before a frame is trusted; a packet whose first byte is `
 
 Discovery ACK payload (24 bytes): `ret_code` (u8), `dev_type` (u8), `sn` (char[16], NUL padded), `lidar_ip` (u8[4] dotted quad), `cmd_port` (u16, little-endian). Known dev types: `9` = Mid360, `35` = Mid360S, `40` = Avia2, `41` = Mid360L.
 
+Key-value control commands (cmd id `0x0100`) carry configuration as `u16 key_num` + `u16 reserved` followed by `key_num` entries of `u16 key` + `u16 length` + value. `set-ip` writes key `0x0004` (`kKeyLidarIpCfg`) with a 12-byte `ip[4] mask[4] gw[4]` value; the lidar answers with a 3-byte ACK payload `{u8 ret_code, u16 error_key}`, and `ret_code == 0 && error_key == 0` means accepted.
+
 Ports: `56000` is the SDK2 discovery broadcast port, `56201` carries status pushes, and `55000` is an SDK1 legacy port kept for compatibility. All facts above come from the public SDK2 protocol.
 
 ## Usage notes
@@ -126,6 +207,8 @@ Ports: `56000` is the SDK2 discovery broadcast port, `56201` carries status push
 - A source that shows up on port 56000 with `0xAA`-headed packets is an SDK2 lidar; sources that never appear are either powered off, on another subnet (data-plane is unicast and must be same-subnet), or filtered.
 - Run it on the host that the lidar sends data to (same NIC/subnet as configured in `host_net_info`).
 - `-ports` accepts any comma-separated list, e.g. `-ports 56000` for a focused scan or a high port for testing.
+- Mind the two port sides: the lidar listens on `56x00` (56100–56500) but sends to the host on `56x01` plus the 56000 discovery broadcast. Listening on lidar-side ports receives nothing; the tool prints a warning when `-ports` contains them.
+- Silence on every port usually means the lidar is in another subnet or only answers queries: try `-probe`, and check the `[hint]` lines the summary prints for cross-subnet lidars.
 
 ## Development
 
@@ -135,7 +218,7 @@ go vet ./...
 go test ./...
 ```
 
-The frame/CRC parsers live in `internal/livox` and are covered by table-driven tests, including byte-exact fixtures generated by a reference implementation of the protocol.
+The frame/CRC parsers and the key-value control payload live in `internal/livox` and are covered by table-driven tests, including byte-exact fixtures generated by a reference implementation of the protocol. The `set-ip` exchange is tested end-to-end against a fake lidar on loopback.
 
 ## Contributing
 
