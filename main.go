@@ -8,7 +8,8 @@
 // The set-ip subcommand changes a lidar's own IP, subnet mask and gateway
 // through the SDK2 key-value control command; reboot restarts a lidar so a
 // saved change takes effect without touching its power; web serves a small
-// browser UI wrapping all of the above.
+// browser UI wrapping all of the above; hunt sweeps unicast discovery
+// queries over whole CIDR blocks to find lidars with unknown IPs.
 package main
 
 import (
@@ -49,6 +50,8 @@ func run() int {
 			return runReboot(os.Args[2:])
 		case "web":
 			return runWeb(os.Args[2:])
+		case "hunt":
+			return runHunt(os.Args[2:])
 		}
 	}
 
