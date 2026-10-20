@@ -30,6 +30,8 @@ func runReboot(args []string) int {
 	lidarIP := fs.String("lidar", "", "current IP of the target lidar (required)")
 	cmdPort := fs.Int("cmd-port", defaultLidarCmdPort, "lidar command UDP port (56100 for the Mid360 family)")
 	delay := fs.Uint("delay", uint(livox.DefaultRebootDelay), "reboot delay the lidar applies before restarting")
+	fixNet := fs.Bool("fix-net", false, "when the lidar never answers, add an on-link route via sudo and retry once")
+	ifaceFlag := fs.String("iface", "", "interface facing the lidar for --fix-net; auto-detected when possible")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -56,6 +58,14 @@ func runReboot(args []string) int {
 	outcome := performReboot(targetIP, *cmdPort, uint32(*delay), func(format string, args ...any) {
 		fmt.Printf(format+"\n", args...)
 	})
+	if outcome.err != nil && *fixNet {
+		fmt.Println("[reboot] no ack; making the lidar on-link first (--fix-net)")
+		if ensureLidarReachable(targetIP, resolveIface(*ifaceFlag, targetIP), false) {
+			outcome = performReboot(targetIP, *cmdPort, uint32(*delay), func(format string, args ...any) {
+				fmt.Printf(format+"\n", args...)
+			})
+		}
+	}
 	if outcome.err != nil {
 		fmt.Fprintf(os.Stderr, "[reboot] %v; check the IP and subnet reachability.\n", outcome.err)
 		return 1

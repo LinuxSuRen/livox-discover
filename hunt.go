@@ -46,10 +46,12 @@ const (
 func runHunt(args []string) int {
 	fs := flag.NewFlagSet("hunt", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "usage: %s hunt [-cidr 192.168.0.0/16]\n", os.Args[0])
+		fmt.Fprintf(fs.Output(), "usage: %s hunt [-cidr 192.168.0.0/16] [--fix-net [-iface enX]]\n", os.Args[0])
 		fs.PrintDefaults()
 	}
 	cidrFlag := fs.String("cidr", huntDefaultCIDRs, "comma-separated IPv4 CIDR blocks to sweep with unicast discovery queries")
+	fixNet := fs.Bool("fix-net", false, "when nothing is found, add the missing on-link route via sudo and sweep once more")
+	ifaceFlag := fs.String("iface", "", "interface facing the lidar for --fix-net; auto-detected when possible")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -102,6 +104,16 @@ func runHunt(args []string) int {
 		}
 	}
 
+	// --fix-net: an empty sweep usually means the CIDR never reached the
+	// wire; add the on-link route (sudo) and try one more round.
+	if len(c.allDiscoveries()) == 0 && *fixNet {
+		fmt.Println("[hunt] nothing found; making the CIDR on-link first (--fix-net)")
+		if ensureCIDROnLink(cidrs[0], resolveIface(*ifaceFlag, nil)) {
+			sent := huntRound(conn, discoveryQueryPort, cidrs, own, packets, c, &seq)
+			fmt.Printf("[hunt] extra round after net-fix: %d queries sent\n", sent)
+		}
+	}
+
 	deadline := time.Now().Add(huntFinalWait)
 	for time.Now().Before(deadline) {
 		drainHuntPackets(packets, own, c)
@@ -111,7 +123,10 @@ func runHunt(args []string) int {
 	printSummary(c)
 	if len(c.allDiscoveries()) == 0 {
 		fmt.Fprintln(os.Stderr, "[hunt] no lidar answered. A directly connected lidar is only reachable when the CIDR is on-link;")
-		printRouteHint(os.Stderr, cidrs)
+		if !*fixNet {
+			printRouteHint(os.Stderr, cidrs)
+			fmt.Fprintln(os.Stderr, "[hunt] or rerun with --fix-net to let the tool add the route via sudo.")
+		}
 		fmt.Fprintln(os.Stderr, "[hunt] also make sure the lidar is powered on; a silent but alive lidar still leaves an ARP entry (arp -a).")
 		return 1
 	}

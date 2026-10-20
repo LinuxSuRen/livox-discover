@@ -9,7 +9,9 @@
 // through the SDK2 key-value control command; reboot restarts a lidar so a
 // saved change takes effect without touching its power; web serves a small
 // browser UI wrapping all of the above; hunt sweeps unicast discovery
-// queries over whole CIDR blocks to find lidars with unknown IPs.
+// queries over whole CIDR blocks to find lidars with unknown IPs; net-fix
+// provisions the host network (route or alias, via sudo) so an off-subnet
+// lidar becomes reachable.
 package main
 
 import (
@@ -52,6 +54,8 @@ func run() int {
 			return runWeb(os.Args[2:])
 		case "hunt":
 			return runHunt(os.Args[2:])
+		case "net-fix":
+			return runNetFix(os.Args[2:])
 		}
 	}
 

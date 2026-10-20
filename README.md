@@ -197,6 +197,21 @@ sudo ip route add 192.168.0.0/16 dev eth0               # Linux
 
 A lidar found by hunt answers `set-ip` and `reboot` the same way — its replies come back through the on-link route (a Mid360S was verified answering cross-subnet unicast this way).
 
+## Let the tool fix the host network
+
+All the `sudo` commands this tool prints can also be executed by the tool itself. `net-fix` provisions the missing piece, then verifies the lidar actually answers:
+
+```text
+$ livox-discover net-fix -lidar 192.168.1.179 -iface en10
+[net-fix] 192.168.1.179 looks on-link via en0 but does not answer; adding a host route via en10
+[net-fix] running: route -n add -host 192.168.1.179 -interface en10 (needs sudo)
+[net-fix] 192.168.1.179 now answers via en10
+```
+
+Design rules: the tool itself stays unprivileged — privileged commands run through `sudo` in your terminal, so the password prompt is your consent and the exact command is visible; only routes/aliases are **added**, nothing existing is changed or removed (macOS reverts primary-address changes made by ifconfig, but additive routes and aliases survive); and reachability is verified with a real discovery probe, not just the routing table — a wrong more-specific route is overridden by a `/32` host route, which outranks it.
+
+The same fix is woven into the other commands via `--fix-net`: `hunt --fix-net` adds the missing on-link route and sweeps again when nothing answers, `set-ip`/`reboot --fix-net [-iface enX]` add a host route and retry once when the lidar stays silent. The interface is auto-detected from the lidar's ARP entry, falling back to the single non-Wi-Fi interface with an IPv4 address; pass `-iface` when that guess is impossible. Windows is not supported.
+
 ## How it works
 
 Livox SDK2 devices answer discovery queries with UDP packets that use the SDK2 command frame format, and many broadcast them periodically even when nobody asks. The tool passively binds the SDK2 broadcast/push ports with `SO_REUSEADDR`, counts every sender it observes, and fully validates + decodes every discovery ACK; with `-probe` it additionally broadcasts queries itself, ignoring the loopback copies of its own broadcasts.

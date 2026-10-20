@@ -193,6 +193,7 @@ func crossSubnetHints(dets []livox.DetectionData, locals []localNet, goos string
 			out = append(out, fmt.Sprintf("[hint] to reach it:     sudo ip addr add %s.50/24 dev %s", key, dev))
 			out = append(out, fmt.Sprintf("[hint] or route only:  sudo ip route add %s/32 dev %s", g.ips[0], dev))
 		}
+		out = append(out, fmt.Sprintf("[hint] or let the tool do it: livox-discover net-fix -lidar %s", g.ips[0]))
 	}
 	return out
 }

@@ -43,6 +43,8 @@ func runSetIP(args []string) int {
 	mask := fs.String("mask", "255.255.255.0", "new subnet mask")
 	gw := fs.String("gw", "", "new gateway; defaults to the first three octets of -ip with a final .1")
 	cmdPort := fs.Int("cmd-port", defaultLidarCmdPort, "lidar command UDP port (56100 for Mid360/Mid360S/Avia2/Mid360L)")
+	fixNet := fs.Bool("fix-net", false, "when the lidar never answers, add an on-link route via sudo and retry once")
+	ifaceFlag := fs.String("iface", "", "interface facing the lidar for --fix-net; auto-detected when possible")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -84,6 +86,14 @@ func runSetIP(args []string) int {
 	outcome := performSetIP(targetIP, *cmdPort, cfg, func(format string, args ...any) {
 		fmt.Printf(format+"\n", args...)
 	})
+	if outcome.err != nil && *fixNet {
+		fmt.Println("[set-ip] no ack; making the lidar on-link first (--fix-net)")
+		if ensureLidarReachable(targetIP, resolveIface(*ifaceFlag, targetIP), false) {
+			outcome = performSetIP(targetIP, *cmdPort, cfg, func(format string, args ...any) {
+				fmt.Printf(format+"\n", args...)
+			})
+		}
+	}
 	if outcome.err != nil {
 		fmt.Fprintf(os.Stderr, "[set-ip] %v\n", outcome.err)
 		if runtime.GOOS == "darwin" {
