@@ -60,14 +60,21 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Create GitHub release
+      - name: Publish release assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           ls -l dist/
-          gh release create "${GITHUB_REF_NAME}" dist/*.tar.gz dist/*.tar.gz.sha256 \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "livox-discover ${GITHUB_REF_NAME}" \
-            --generate-notes \
-            --verify-tag
+          # The release may already exist (e.g. created on merge or by hand);
+          # create it only when missing, then attach the assets either way.
+          if ! gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" > /dev/null 2>&1; then
+            gh release create "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "livox-discover ${GITHUB_REF_NAME}" \
+              --generate-notes \
+              --verify-tag
+          fi
+          gh release upload "${GITHUB_REF_NAME}" dist/*.tar.gz dist/*.tar.gz.sha256 \
+            --clobber \
+            --repo "${GITHUB_REPOSITORY}"
