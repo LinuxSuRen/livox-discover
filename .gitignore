@@ -9,3 +9,6 @@ __pycache__/
 *.pyc
 !web/dist/
 node_modules/
+
+# local artifacts
+mj.tar
