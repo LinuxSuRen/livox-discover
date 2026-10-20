@@ -174,6 +174,29 @@ The lidar's discovery traffic is link-layer broadcast, so as long as it hangs on
 - On Linux, strict reverse-path filtering (`net.ipv4.conf.all.rp_filter = 1`) can drop cross-subnet packets as martians; relax it for the lidar-facing interface if the tool stays silent while `tcpdump` still shows traffic.
 - When a discovered lidar is outside every local subnet, the summary prints `[hint]` lines with the exact `ifconfig`/`ip` commands that give this host a path to it — unicast tools (drivers, `set-ip`) need one of them. `set-ip` prints the same advice when a lidar never answers.
 
+## Hunt for a lidar with an unknown IP
+
+A directly wired lidar whose IP nobody knows is the hardest case: some firmware (verified on Mid360S) never broadcasts spontaneously and ignores discovery queries from other subnets, so neither passive listening nor `-probe` sees anything. `hunt` inverts the game — it unicasts a discovery query to **every host** of a CIDR block and reports whoever answers:
+
+```text
+$ livox-discover hunt
+[hunt] sweeping 192.168.0.0/16 with unicast queries (source :56530)
+[hit] src=192.168.1.179:56000 -> local:56530  len=48 ...
+[discovery] src=192.168.1.179  dev=Mid360S(35)  sn=ARMCP150033179  lidar_ip=192.168.1.179  cmd_port=56100
+[hunt] round 1/2: 65022 queries sent
+```
+
+The default sweeps `192.168.0.0/16` (~65k addresses in about a minute), covering the Livox factory subnets — Mid360S ships at `192.168.1.1xx`, Mid360 at `192.168.144.1xx` (the last digits come from the SN) — plus typical robot-internal networks. Narrow the scope with `-cidr 192.168.1.0/24`.
+
+The CIDR must be **on-link** for the queries to reach the wire. When nothing answers, hunt prints the exact command that fixes it, for example:
+
+```bash
+sudo route -n add -net 192.168.0.0/16 -interface en10   # macOS
+sudo ip route add 192.168.0.0/16 dev eth0               # Linux
+```
+
+A lidar found by hunt answers `set-ip` and `reboot` the same way — its replies come back through the on-link route (a Mid360S was verified answering cross-subnet unicast this way).
+
 ## How it works
 
 Livox SDK2 devices answer discovery queries with UDP packets that use the SDK2 command frame format, and many broadcast them periodically even when nobody asks. The tool passively binds the SDK2 broadcast/push ports with `SO_REUSEADDR`, counts every sender it observes, and fully validates + decodes every discovery ACK; with `-probe` it additionally broadcasts queries itself, ignoring the loopback copies of its own broadcasts.
