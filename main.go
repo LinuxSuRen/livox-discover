@@ -3,12 +3,16 @@
 // sender it observes. Datagrams that decode as SDK2 discovery ACKs are
 // surfaced with device type, serial number and lidar IP. With -probe a
 // discovery query is actively broadcast from every IPv4 interface as well,
-// which also reaches lidars that stay silent unless queried.
+// which also reaches lidars that stay silent unless queried. With
+// -vendor hesai the MSOP port (2368) is added to the listeners, so Hesai
+// lidars (JT128 / AT128 family) show up through the point clouds they
+// stream.
 //
-// The set-ip subcommand changes a lidar's own IP, subnet mask and gateway
-// through the SDK2 key-value control command; reboot restarts a lidar so a
-// saved change takes effect without touching its power; web serves a small
-// browser UI wrapping all of the above.
+// The set-ip subcommand changes a lidar's own IP, subnet mask and gateway —
+// through the SDK2 key-value control command for Livox, or through PTC (TCP
+// 9347) for Hesai; reboot restarts a lidar so a saved change takes effect
+// without touching its power; web serves a small browser UI wrapping the
+// Livox capabilities.
 package main
 
 import (
@@ -25,6 +29,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/LinuxSuRen/livox-discover/internal/hesai"
 )
 
 const (
@@ -57,6 +63,7 @@ func run() int {
 	jsonOut := fs.Bool("json", false, "print a machine-readable JSON report instead of the text log")
 	portsFlag := fs.String("ports", defaultPorts, "comma-separated UDP ports to listen on")
 	probe := fs.Bool("probe", false, "also broadcast a discovery query every second from every IPv4 interface (finds lidars that only answer queries)")
+	vendorFlag := fs.String("vendor", "livox", "comma-separated lidar families to listen for: livox, hesai (hesai adds the 2368 MSOP port)")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return 2
 	}
@@ -68,10 +75,18 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "-duration must be positive")
 		return 2
 	}
+	vendors, err := parseVendors(*vendorFlag)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
 	ports, err := parsePorts(*portsFlag)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
+	}
+	if vendors["hesai"] && !containsPort(ports, hesai.MSOPPort) {
+		ports = append(ports, hesai.MSOPPort)
 	}
 
 	// In text mode progress goes to stdout like the original tool; in JSON
@@ -210,6 +225,10 @@ func handlePacket(c *collector, p udpPacket, jsonOut bool) {
 		fmt.Printf("[discovery] src=%s  dev=%s(%d)  sn=%s  lidar_ip=%s  cmd_port=%d\n",
 			p.srcIP, d.DevTypeName(), d.DevType, d.SN, d.LidarIP, d.CmdPort)
 	}
+	if ev.NewHesai {
+		fmt.Printf("[hesai] src=%s:%d -> local:%d  len=%d  Hesai MSOP point cloud — the src IP is the lidar's address\n",
+			p.srcIP, p.srcPort, p.dstPort, len(p.data))
+	}
 }
 
 func printSummary(c *collector) {
@@ -222,12 +241,28 @@ func printSummary(c *collector) {
 	for _, s := range sources {
 		fmt.Printf("src %-15s packets=%-6d livox_header=%-6d ports=%s\n",
 			s.IP, s.Packets, s.LivoxPackets, formatPortCounts(s.Ports))
+		if s.HesaiPackets > 0 {
+			fmt.Printf("    hesai_msop=%d  Hesai MSOP point cloud; the src IP is the lidar's address\n", s.HesaiPackets)
+		}
 		for _, d := range s.sortedDiscoveries() {
 			fmt.Printf("    dev=%s(%d)  sn=%s  lidar_ip=%s  cmd_port=%d  ret_code=%d\n",
 				d.DevTypeName(), d.DevType, d.SN, d.LidarIP, d.CmdPort, d.RetCode)
 		}
 	}
 	for _, h := range crossSubnetHints(c.allDiscoveries(), localIPv4Nets(), runtime.GOOS) {
+		fmt.Println(h)
+	}
+	var hesaiIPs []string
+	for _, s := range sources {
+		if s.HesaiPackets == 0 {
+			continue
+		}
+		if ip := net.ParseIP(s.IP); ip != nil && ip.IsLoopback() {
+			continue // local test senders are not a routing problem
+		}
+		hesaiIPs = append(hesaiIPs, s.IP)
+	}
+	for _, h := range crossSubnetHintLines(hesaiIPs, localIPv4Nets(), runtime.GOOS) {
 		fmt.Println(h)
 	}
 }
@@ -263,6 +298,38 @@ func parsePorts(spec string) ([]int, error) {
 		return nil, fmt.Errorf("no valid ports in %q", spec)
 	}
 	return ports, nil
+}
+
+// parseVendors splits a comma-separated -vendor list into a set, rejecting
+// unknown families so a typo cannot silently narrow a scan to nothing.
+func parseVendors(spec string) (map[string]bool, error) {
+	out := map[string]bool{}
+	for _, field := range strings.Split(spec, ",") {
+		field = strings.ToLower(strings.TrimSpace(field))
+		if field == "" {
+			continue
+		}
+		switch field {
+		case "livox", "hesai":
+			out[field] = true
+		default:
+			return nil, fmt.Errorf("unknown vendor %q (want livox and/or hesai)", field)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no vendor in %q", spec)
+	}
+	return out, nil
+}
+
+// containsPort reports whether ports lists p.
+func containsPort(ports []int, p int) bool {
+	for _, port := range ports {
+		if port == p {
+			return true
+		}
+	}
+	return false
 }
 
 // lidarSidePorts lists the lidar-side command/data ports of the SDK2 Mid360

@@ -172,6 +172,43 @@ func TestCollectorToleratesMalformedLivox(t *testing.T) {
 	}
 }
 
+func TestCollectorCountsHesaiMSOP(t *testing.T) {
+	c := newCollector()
+	// A JT128-shaped MSOP packet: 0xEE 0xFF marker, 1100 bytes total.
+	msop := append([]byte{0xEE, 0xFF, 0x01, 0x04}, make([]byte, 1096)...)
+	// Velodyne data packets share port 2368 but start 0xFF 0xEE.
+	velodyne := append([]byte{0xFF, 0xEE}, make([]byte, 1098)...)
+
+	first := c.add("192.0.2.20", 10000, 2368, msop)
+	if !first.NewHesai {
+		t.Error("the first MSOP packet should be reported as a new Hesai source")
+	}
+	if second := c.add("192.0.2.20", 10000, 2368, msop); second.NewHesai {
+		t.Error("the second MSOP packet must not re-report the source")
+	}
+	c.add("192.0.2.21", 10000, 2368, velodyne)
+
+	sources := c.sortedSources()
+	if len(sources) != 2 {
+		t.Fatalf("got %d sources, want 2", len(sources))
+	}
+	hesaiSrc, other := sources[0], sources[1]
+	if hesaiSrc.IP != "192.0.2.20" || hesaiSrc.HesaiPackets != 2 || hesaiSrc.LivoxPackets != 0 {
+		t.Errorf("192.0.2.20 hesai=%d livox=%d, want 2/0", hesaiSrc.HesaiPackets, hesaiSrc.LivoxPackets)
+	}
+	if other.IP != "192.0.2.21" || other.HesaiPackets != 0 {
+		t.Errorf("velodyne-order packet counted as hesai: %+v", other)
+	}
+
+	rep := buildReport(c, time.Second, []int{2368}, nil, false)
+	if rep.Sources[0].HesaiPackets != 2 {
+		t.Errorf("report hesai_packets = %d, want 2", rep.Sources[0].HesaiPackets)
+	}
+	if rep.Sources[1].HesaiPackets != 0 {
+		t.Errorf("report hesai_packets for the velodyne source = %d, want 0", rep.Sources[1].HesaiPackets)
+	}
+}
+
 func TestLidarSidePortWarning(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -236,6 +273,23 @@ func TestParsePorts(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestParseVendors(t *testing.T) {
+	got, err := parseVendors("livox")
+	if err != nil || !got["livox"] || got["hesai"] {
+		t.Errorf("parseVendors(livox) = %v, %v", got, err)
+	}
+	got, err = parseVendors(" Livox , hesai ")
+	if err != nil || !got["livox"] || !got["hesai"] {
+		t.Errorf("parseVendors mixed = %v, %v", got, err)
+	}
+	if _, err := parseVendors("livox,velodyne"); err == nil {
+		t.Error("parseVendors should reject an unknown family")
+	}
+	if _, err := parseVendors(","); err == nil {
+		t.Error("parseVendors should reject an empty list")
 	}
 }
 

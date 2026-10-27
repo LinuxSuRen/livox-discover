@@ -136,7 +136,18 @@ func localIPv4Nets() []localNet {
 // lidar, but unicast tools (drivers, set-ip) cannot reach it without an
 // added address or route. goos picks the suggested command syntax.
 func crossSubnetHints(dets []livox.DetectionData, locals []localNet, goos string) []string {
-	if len(locals) == 0 || len(dets) == 0 {
+	var ips []string
+	for _, d := range dets {
+		ips = append(ips, d.LidarIP)
+	}
+	return crossSubnetHintLines(ips, locals, goos)
+}
+
+// crossSubnetHintLines is crossSubnetHints over bare lidar IPs, so sources
+// that were recognized without a discovery ACK — a Hesai lidar seen through
+// its MSOP broadcasts, say — get the same advice.
+func crossSubnetHintLines(ips []string, locals []localNet, goos string) []string {
+	if len(locals) == 0 || len(ips) == 0 {
 		return nil
 	}
 
@@ -150,8 +161,8 @@ func crossSubnetHints(dets []livox.DetectionData, locals []localNet, goos string
 	type group struct{ ips []string }
 	groups := map[string]*group{}
 	var order []string
-	for _, d := range dets {
-		ip := net.ParseIP(d.LidarIP)
+	for _, lidarIP := range ips {
+		ip := net.ParseIP(lidarIP)
 		if ip == nil || ip.To4() == nil {
 			continue
 		}
@@ -173,7 +184,7 @@ func crossSubnetHints(dets []livox.DetectionData, locals []localNet, goos string
 			groups[key] = g
 			order = append(order, key)
 		}
-		g.ips = append(g.ips, d.LidarIP)
+		g.ips = append(g.ips, lidarIP)
 	}
 	if len(groups) == 0 {
 		return nil

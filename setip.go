@@ -1,8 +1,11 @@
-// Command livox-discover set-ip: change the IP of a Livox SDK2 lidar.
+// Command livox-discover set-ip: change the IP of a lidar.
 //
-// The change rides on the SDK2 key-value control command (cmd 0x0100, key
-// kKeyLidarIpCfg = 0x0004) which is unicast to the lidar's command port
-// (56100 on the Mid360 family); the lidar ACKs with {ret_code, error_key}.
+// For Livox SDK2 lidars (the default) the change rides on the SDK2
+// key-value control command (cmd 0x0100, key kKeyLidarIpCfg = 0x0004) which
+// is unicast to the lidar's command port (56100 on the Mid360 family); the
+// lidar ACKs with {ret_code, error_key}. For Hesai lidars (-vendor hesai)
+// it rides on the PTC SetNet command (TCP 9347); the lidar ACKs its return
+// code in the response header.
 package main
 
 import (
@@ -13,6 +16,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/LinuxSuRen/livox-discover/internal/hesai"
 	"github.com/LinuxSuRen/livox-discover/internal/livox"
 )
 
@@ -35,14 +39,16 @@ const (
 func runSetIP(args []string) int {
 	fs := flag.NewFlagSet("set-ip", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "usage: %s set-ip -lidar <current ip> -ip <new ip> [-mask m] [-gw g] [-cmd-port p]\n", os.Args[0])
+		fmt.Fprintf(fs.Output(), "usage: %s set-ip -lidar <current ip> -ip <new ip> [-mask m] [-gw g] [-vendor livox|hesai] [-cmd-port p] [-ptc-port p]\n", os.Args[0])
 		fs.PrintDefaults()
 	}
 	lidarIP := fs.String("lidar", "", "current IP of the target lidar, as reported by livox-discover (required)")
 	newIP := fs.String("ip", "", "new lidar IP (required)")
 	mask := fs.String("mask", "255.255.255.0", "new subnet mask")
 	gw := fs.String("gw", "", "new gateway; defaults to the first three octets of -ip with a final .1")
-	cmdPort := fs.Int("cmd-port", defaultLidarCmdPort, "lidar command UDP port (56100 for Mid360/Mid360S/Avia2/Mid360L)")
+	vendor := fs.String("vendor", "livox", "lidar family: livox (SDK2 over UDP) or hesai (PTC over TCP)")
+	cmdPort := fs.Int("cmd-port", defaultLidarCmdPort, "livox lidar command UDP port (56100 for Mid360/Mid360S/Avia2/Mid360L)")
+	ptcPort := fs.Int("ptc-port", hesai.DefaultPTCPort, "hesai PTC TCP port (with -vendor hesai)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -54,8 +60,16 @@ func runSetIP(args []string) int {
 		fmt.Fprintln(os.Stderr, "-lidar and -ip are required")
 		return 2
 	}
-	if *cmdPort < 1 || *cmdPort > 65535 {
+	if *vendor != "livox" && *vendor != "hesai" {
+		fmt.Fprintf(os.Stderr, "-vendor must be livox or hesai, got %q\n", *vendor)
+		return 2
+	}
+	if *vendor == "livox" && (*cmdPort < 1 || *cmdPort > 65535) {
 		fmt.Fprintln(os.Stderr, "-cmd-port must be 1-65535")
+		return 2
+	}
+	if *vendor == "hesai" && (*ptcPort < 1 || *ptcPort > 65535) {
+		fmt.Fprintln(os.Stderr, "-ptc-port must be 1-65535")
 		return 2
 	}
 
@@ -68,14 +82,40 @@ func runSetIP(args []string) int {
 		}
 	}
 
-	cfg := livox.LidarIPConfig{IP: *newIP, Mask: *mask, Gateway: gateway}
-	if _, err := livox.BuildSetLidarIPPayload(cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "invalid target configuration: %v\n", err)
-		return 2
-	}
 	targetIP := net.ParseIP(*lidarIP)
 	if targetIP == nil || targetIP.To4() == nil {
 		fmt.Fprintf(os.Stderr, "-lidar %q is not an IPv4 address\n", *lidarIP)
+		return 2
+	}
+
+	if *vendor == "hesai" {
+		cfg := hesai.NetConfig{IP: *newIP, Mask: *mask, Gateway: gateway}
+		if _, err := hesai.BuildSetNetPayload(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "invalid target configuration: %v\n", err)
+			return 2
+		}
+		fmt.Printf("[set-ip] %s:%d (PTC) -> ip=%s mask=%s gw=%s\n", *lidarIP, *ptcPort, cfg.IP, cfg.Mask, cfg.Gateway)
+		client, err := dialHesai(targetIP, *ptcPort, func(format string, args ...any) {
+			fmt.Printf(format+"\n", args...)
+		})
+		if err != nil {
+			printPTCError("set-ip", err, *lidarIP)
+			return 1
+		}
+		defer client.Close()
+		if err := client.SetNet(cfg); err != nil {
+			printPTCError("set-ip", err, *lidarIP)
+			return 1
+		}
+		fmt.Printf("[set-ip] success: lidar %s stores ip %s mask %s gw %s\n", *lidarIP, cfg.IP, cfg.Mask, cfg.Gateway)
+		fmt.Println("[set-ip] a stored change only takes effect after the lidar restarts, and the runtime IP stays on the old value until then.")
+		fmt.Printf("[set-ip] apply it now: %s reboot -vendor hesai -lidar %s  (the reboot still targets the current IP)\n", os.Args[0], *lidarIP)
+		return 0
+	}
+
+	cfg := livox.LidarIPConfig{IP: *newIP, Mask: *mask, Gateway: gateway}
+	if _, err := livox.BuildSetLidarIPPayload(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "invalid target configuration: %v\n", err)
 		return 2
 	}
 

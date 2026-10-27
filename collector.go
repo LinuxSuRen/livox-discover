@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LinuxSuRen/livox-discover/internal/hesai"
 	"github.com/LinuxSuRen/livox-discover/internal/livox"
 )
 
@@ -24,6 +25,7 @@ type sourceInfo struct {
 	IP           string
 	Packets      int
 	LivoxPackets int         // packets whose first byte is the 0xAA start-of-frame
+	HesaiPackets int         // packets recognized as Hesai MSOP point clouds
 	Ports        map[int]int // local port -> packet count
 	discoveries  map[discoveryKey]livox.DetectionData
 }
@@ -34,6 +36,7 @@ type packetEvent struct {
 	HitCount     int
 	ShowHit      bool
 	NewDiscovery *livox.DetectionData
+	NewHesai     bool // first Hesai MSOP packet seen from this source IP
 }
 
 // collector reduces the packet stream to one entry per source IP. It is pure
@@ -68,12 +71,20 @@ func (c *collector) add(ip string, srcPort, dstPort int, data []byte) packetEven
 	if isLivox {
 		s.LivoxPackets++
 	}
+	isHesai := hesai.IsMSOP(data)
+	if isHesai {
+		s.HesaiPackets++
+	}
 	s.Ports[dstPort]++
 
 	key := hitKey{ip: ip, srcPort: srcPort, dstPort: dstPort}
 	c.hits[key]++
 	count := c.hits[key]
-	ev := packetEvent{HitCount: count, ShowHit: count == 1 || count == 50 || count == 500}
+	ev := packetEvent{
+		HitCount: count,
+		ShowHit:  count == 1 || count == 50 || count == 500,
+		NewHesai: isHesai && s.HesaiPackets == 1,
+	}
 
 	if isLivox {
 		if det, err := livox.ParseDiscoveryACK(data); err == nil {
@@ -162,6 +173,7 @@ type sourceJSON struct {
 	IP           string                `json:"ip"`
 	Packets      int                   `json:"packets"`
 	LivoxPackets int                   `json:"livox_packets"`
+	HesaiPackets int                   `json:"hesai_packets,omitempty"`
 	Ports        map[string]int        `json:"ports"`
 	Discoveries  []livox.DetectionData `json:"discoveries,omitempty"`
 }
@@ -188,6 +200,7 @@ func buildReport(c *collector, duration time.Duration, ports []int, skipped []sk
 			IP:           s.IP,
 			Packets:      s.Packets,
 			LivoxPackets: s.LivoxPackets,
+			HesaiPackets: s.HesaiPackets,
 			Ports:        map[string]int{},
 		}
 		for p, n := range s.Ports {

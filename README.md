@@ -1,6 +1,6 @@
 # livox-discover
 
-Zero-dependency CLI that finds **Livox SDK2 lidars** (Mid360 / Mid360S / Avia / Avia2 ...) on your network in seconds, by listening to their UDP broadcast/push ports and decoding their discovery replies — and can re-IP a lidar without the Livox tools, from the CLI or a small built-in web UI.
+Zero-dependency CLI that finds **Livox SDK2 lidars** (Mid360 / Mid360S / Avia / Avia2 ...) on your network in seconds, by listening to their UDP broadcast/push ports and decoding their discovery replies — and can re-IP a lidar without the Livox tools, from the CLI or a small built-in web UI. It also finds **Hesai lidars** (JT128 / AT128 family) through the point clouds they stream, and re-IPs / reboots them over their PTC control channel.
 
 Written in Go, standard library only.
 
@@ -12,6 +12,8 @@ Livox SDK2 has no standalone discovery CLI. Common pain it solves:
 - Multiple Livox units are on the network and you need the real IP of each;
 - You want to see which units are actually broadcasting before digging into driver configs;
 - You need to move a lidar to another IP and don't want to install the SDK just for that.
+
+Hesai lidars have no discovery protocol at all, but they stream MSOP point-cloud packets to UDP 2368 — factory-default units broadcast them — so the same listen-and-report approach finds them (`-vendor hesai`), and the same set-ip / reboot workflow moves them to another subnet over PTC (TCP 9347).
 
 ## Install
 
@@ -60,13 +62,14 @@ The `src` IP in the summary is the lidar's address — paste it into the `ip` fi
 | `-duration` | `15s` | how long to listen (Go duration syntax: `15s`, `500ms`, `2m`) |
 | `-ports` | `55000,56000,56201` | comma-separated UDP ports to listen on |
 | `-probe` | off | also broadcast a discovery query every second from every IPv4 interface; some lidars stay silent unless queried |
+| `-vendor` | `livox` | comma-separated lidar families to listen for: `livox`, `hesai` (adds the 2368 MSOP port) |
 | `-json` | off | print one machine-readable JSON report instead of the text log |
 
 `Ctrl-C` stops listening early and still prints the report (exit code 130). Exit codes: `0` normal, `1` when no port could be bound at all, `2` for invalid flags.
 
 ### JSON output
 
-`-json` keeps stdout to the report alone (progress goes to stderr), so it can be piped straight into other tools:
+`-json` keeps stdout to the report alone (progress goes to stderr), so it can be piped straight into other tools. Each source additionally carries `hesai_packets` when it was recognized as a Hesai MSOP stream:
 
 ```bash
 livox-discover -json -duration 10s | jq -r '.sources[].discoveries[] | "\(.sn) \(.lidar_ip) \(.dev_type_name)"'
@@ -130,6 +133,48 @@ Notes:
 - To change the IP of a lidar that currently sits in another subnet than your NIC, first add a temporary address or host route on the subnet the lidar is in (`sudo ifconfig <iface> alias <lidar-net>.50 255.255.255.0` on macOS, `sudo ip addr add <lidar-net>.50/24 dev <iface>` on Linux); the tool prints the matching hint when it detects the situation.
 - The frame carries ip/mask/gateway as one key-value entry; an inconsistent triple is rejected by the lidar (`ret_code != 0`, `error_key = 0x0004`).
 
+## Hesai lidars (JT128 / AT128 family)
+
+Hesai lidars answer no discovery queries, but they stream their MSOP point clouds to UDP 2368 — a factory-default unit broadcasts 1100-byte packets from source port 10000, so passively listening finds it and its real IP:
+
+```text
+$ livox-discover -vendor hesai -duration 5s
+[listen] 0.0.0.0:56000
+[listen] 0.0.0.0:2368
+listening 5s ...
+[hit] src=192.168.124.20:10000 -> local:2368  len=1100  head=ee ff 01 04 89 00 80 02 ...  cnt=1
+[hesai] src=192.168.124.20:10000 -> local:2368  len=1100  Hesai MSOP point cloud — the src IP is the lidar's address
+=== summary ===
+src 192.168.124.20  packets=44839  livox_header=0      ports=2368:44839
+    hesai_msop=44839  Hesai MSOP point cloud; the src IP is the lidar's address
+```
+
+(Real capture from a JT128 on a robot sensor network; `-vendor livox,hesai` listens for both families at once.)
+
+### Change a Hesai lidar's IP
+
+`set-ip -vendor hesai` talks PTC, the TCP control channel the Hesai SDK itself uses, so no vendor tools or SDK build is needed:
+
+```text
+$ livox-discover set-ip -vendor hesai -lidar 192.168.1.201 -ip 192.168.124.20 -gw 192.168.124.1
+[set-ip] 192.168.1.201:9347 (PTC) -> ip=192.168.124.20 mask=255.255.255.0 gw=192.168.124.1
+[ptc] channel ok (calibration answer: 4096 bytes)
+[set-ip] success: lidar 192.168.1.201 stores ip 192.168.124.20 mask 255.255.255.0 gw 192.168.124.1
+[set-ip] a stored change only takes effect after the lidar restarts, and the runtime IP stays on the old value until then.
+[set-ip] apply it now: livox-discover reboot -vendor hesai -lidar 192.168.1.201  (the reboot still targets the current IP)
+```
+
+Flags: `-lidar` (current IP, required), `-ip` / `-mask` / `-gw` (same semantics as the Livox path), `-ptc-port` (default 9347). The read-only calibration query doubles as a channel probe before anything is written.
+
+`reboot -vendor hesai` restarts the lidar over the same channel — verified on a JT128: a reboot takes about half a minute, after which the point clouds come from the stored address.
+
+Notes:
+
+- **A stored SetNet only applies across a restart** (verified on a JT128, and in the Hesai SDK docs): the ACK means "stored", the runtime IP stays on the old value until the lidar reboots. That is why the reboot above still targets the *current* IP.
+- Factory default for the JT128/AT128 family is `192.168.1.201/24`. When the host sits on another subnet, ping and PTC both fail while the MSOP broadcast keeps flowing — exactly the "silent driver" trap. The summary then prints the same `[hint]` lines as for Livox: add a temporary address (`sudo ip addr add 192.168.1.20/24 dev <iface>`) or host route, run `set-ip`, then reboot.
+- A Velodyne on the same port is not misreported: its data packets start `ff ee` where Hesai starts `ee ff`.
+- A lidar configured for unicast MSOP (a fixed destination host) only shows up on that host; run the tool there.
+
 ## Reboot a lidar
 
 `reboot` sends the SDK2 reboot command (`cmd 0x0200`) to the lidar's command port — the cable-free way to make a saved IP change take effect:
@@ -153,7 +198,7 @@ livox-discover web                        # http://127.0.0.1:8080
 livox-discover web -listen 0.0.0.0:8080   # open the UI to the network
 ```
 
-The page has a scan panel (duration + active-probe toggle), the discovered-lidar table, and an ops panel that prefills from the selected lidar: change IP and reboot with one click, cross-subnet hints included. Scan progress streams over SSE (`GET /api/events`, pushed only on change) with `GET /api/scan` as a plain REST fallback; errors carry stable `LVX-*` codes with readable messages.
+The page has a scan panel (duration + active-probe toggle), the discovered-lidar table, and an ops panel that prefills from the selected lidar: change IP and reboot with one click, cross-subnet hints included. Scan progress streams over SSE (`GET /api/events`, pushed only on change) with `GET /api/scan` as a plain REST fallback; errors carry stable `LVX-*` codes with readable messages. The web UI currently drives Livox lidars; Hesai lidars run through the CLI commands above.
 
 | Endpoint | Purpose |
 |---|---|
@@ -202,6 +247,23 @@ Key-value control commands (cmd id `0x0100`) carry configuration as `u16 key_num
 
 Ports: `56000` is the SDK2 discovery broadcast port, `56201` carries status pushes, and `55000` is an SDK1 legacy port kept for compatibility. All facts above come from the public SDK2 protocol.
 
+### Hesai side
+
+Hesai lidars have no queryable discovery; instead the MSOP point-cloud stream gives them away. MSOP packets of the JT128/AT128 family are 1100 bytes, start with the `ee ff` start-of-block marker followed by a protocol version (a captured JT128 sends `ee ff 01 04 ...` from source port 10000 to UDP 2368, broadcast from factory defaults). The marker byte order alone separates them from Velodyne packets on the same port (`ff ee`).
+
+Configuration rides on PTC version 1.0 over TCP 9347 (facts from the BSD-licensed [HesaiLidar_SDK_2.0](https://github.com/HesaiTechnology/HesaiLidar_SDK_2.0), field-verified on a JT128). Frame layout:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 1 | protocol identifier, always `0x47` |
+| 1 | 1 | protocol identifier, always `0x74` |
+| 2 | 1 | command code (`0x05` read calibration, `0x10` reboot, `0x21` set net) |
+| 3 | 1 | return code, `0` in requests |
+| 4 | 4 | payload length, big-endian |
+| 8 | … | payload |
+
+No checksums. A response repeats the request's command code; a non-zero return code is a rejection. The `set net` payload is 15 bytes: `ip[4] mask[4] gw[4]` as dotted quads, a VLAN flag byte and a big-endian `u16` VLAN id. The client resynchronizes on the `0x47 0x74` marker before parsing a response header, mirroring the SDK's header search.
+
 ## Usage notes
 
 - A source that shows up on port 56000 with `0xAA`-headed packets is an SDK2 lidar; sources that never appear are either powered off, on another subnet (data-plane is unicast and must be same-subnet), or filtered.
@@ -218,7 +280,7 @@ go vet ./...
 go test ./...
 ```
 
-The frame/CRC parsers and the key-value control payload live in `internal/livox` and are covered by table-driven tests, including byte-exact fixtures generated by a reference implementation of the protocol. The `set-ip` exchange is tested end-to-end against a fake lidar on loopback.
+The frame/CRC parsers and the key-value control payload live in `internal/livox` and are covered by table-driven tests, including byte-exact fixtures generated by a reference implementation of the protocol. The `set-ip` exchange is tested end-to-end against a fake lidar on loopback. The Hesai MSOP signature and PTC client live in `internal/hesai`, tested the same way — including a fake PTC lidar that prefixes stray bytes to exercise the header resynchronization.
 
 ## Contributing
 
